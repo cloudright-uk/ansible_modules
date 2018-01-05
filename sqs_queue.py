@@ -7,8 +7,8 @@ __metaclass__ = type
 
 
 ANSIBLE_METADATA = {'metadata_version': '1.1',
-                    'status': ['stableinterface'],
-                    'supported_by': 'certified'}
+                    'status': ['preview'],
+                    'supported_by': 'community'}
 
 
 DOCUMENTATION = """
@@ -18,13 +18,13 @@ short_description: Creates or deletes AWS SQS queues.
 description:
   - Create or delete AWS SQS queues.
   - Update attributes on existing queues.
-version_added: "2.0"
+  - FIFO queues supported
+version_added: "2.5"
 author:
-  - Alan Loi (@loia)
-  - Fernando Jose Pando (@nand0p)
-  - Nadir Lloret (@nadirollo)
+  - Nathan Webster (@nathanwebsterdotme)
 requirements:
-  - "boto >= 2.33.0"
+  - "boto3 >= 1.44.0"
+  - "botocore >= 1.85.0"
 options:
   state:
     description:
@@ -36,6 +36,12 @@ options:
     description:
       - Name of the queue.
     required: true
+  queue_type:
+    description:
+      - The type of queue to create.  Can only be set at creation time and can't be changed later.  Will append .fifo to name of queue as this is required by AWS.
+    required: false
+    choices: ['standard', 'fifo']
+    default: standard
   default_visibility_timeout:
     description:
       - The default visibility timeout in seconds.
@@ -66,13 +72,18 @@ options:
       - The json dict policy to attach to queue
     required: false
     default: null
-    version_added: "2.1"
   redrive_policy:
     description:
       - json dict with the redrive_policy (see example)
     required: false
     default: null
-    version_added: "2.2"
+  fifo_content_based_deduplication:
+    description:
+      - Option to enable / disable Content Based Deduplication.  'queue_type' must be set to 'fifo' to use this option.
+    required: False
+    choices: ['true', 'false']
+    default: false
+
 extends_documentation_fragment:
     - aws
     - ec2
@@ -119,12 +130,33 @@ region:
     type: string
     returned: always
     sample: 'us-east-1'
+fifo_content_based_deduplication:
+    description: Bool if Content Based Deduplication is enabled for FIFO queues.
+    type: string
+    returned: always
+    sample: 'true'
 '''
 
 EXAMPLES = '''
 # Create SQS queue with redrive policy
 - sqs_queue:
     name: my-queue
+    region: ap-southeast-2
+    default_visibility_timeout: 120
+    message_retention_period: 86400
+    maximum_message_size: 1024
+    delivery_delay: 30
+    receive_message_wait_time: 20
+    policy: "{{ json_dict }}"
+    redrive_policy:
+      maxReceiveCount: 5
+      deadLetterTargetArn: arn:aws:sqs:eu-west-1:123456789012:my-dead-queue
+
+# Create a FIFO type queue with Content Deduplication enabled.
+- sqs_queue:
+    name: my-queue
+    queue_type: fifo
+    fifo_content_based_deduplication: true
     region: ap-southeast-2
     default_visibility_timeout: 120
     message_retention_period: 86400
