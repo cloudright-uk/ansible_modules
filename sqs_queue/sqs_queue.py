@@ -260,7 +260,7 @@ def create_or_update_sqs_queue(connection, module):
         result['msg'] = 'Failed to create/update sqs queue due to error: ' + traceback.format_exc()
         module.fail_json(**result)
     else:
-        module.exit_json(**result)
+        module.exit_json(**camel_dict_to_snake_dict(result))
 
 
 def update_sqs_queue(connection,
@@ -341,7 +341,7 @@ def delete_sqs_queue(connection, module):
         result['msg'] = 'Failed to delete sqs queue due to error: ' + traceback.format_exc()
         module.fail_json(**result)
     else:
-        module.exit_json(**result)
+        module.exit_json(**camel_dict_to_snake_dict(result))
 
 
 def main():
