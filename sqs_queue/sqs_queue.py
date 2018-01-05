@@ -34,42 +34,42 @@ options:
     default: 'present'
   name:
     description:
-      - Name of the queue.
+      - Name of the queue. A queue name can have up to 80 characters. Valid values: alphanumeric characters, hyphens (- ), and underscores (_ ).
     required: true
   queue_type:
     description:
-      - The type of queue to create.  Can only be set at creation time and can't be changed later.  Will append .fifo to name of queue as this is required by AWS.
+      - The type of queue to create.  Can only be set at creation time and can't be changed later.  Will append ".fifo" to name of queue as this is required by AWS.
     required: false
     choices: ['standard', 'fifo']
     default: standard
   default_visibility_timeout:
     description:
-      - The default visibility timeout in seconds.
+      - The default visibility timeout in seconds. Valid values: An integer from 0 to 43,200 (12 hours).
     required: false
-    default: null
+    default: 30
   message_retention_period:
     description:
-      - The message retention period in seconds.
+      - The length of time, in seconds, for which Amazon SQS retains a message. Valid values: An integer representing seconds, from 60 (1 minute) to 1,209,600 (14 days)
     required: false
-    default: null
+    default: 345,600 (4 days)
   maximum_message_size:
     description:
-      - The maximum message size in bytes.
+      - The limit of how many bytes a message can contain before Amazon SQS rejects it. Valid values: An integer from 1,024 bytes (1 KiB) up to 262,144 bytes (256 KiB).
     required: false
-    default: null
+    default: 262,144 (256 KiB)
   delivery_delay:
     description:
-      - The delivery delay in seconds.
+      - The length of time, in seconds, for which the delivery of all messages in the queue is delayed. Valid values: An integer from 0 to 900 (15 minutes).
     required: false
-    default: null
+    default: 0
   receive_message_wait_time:
     description:
-      - The receive message wait time in seconds.
+      - The receive message wait time in seconds.  Must be a value between 0 and 20.
     required: false
-    default: null
+    default: 0
   policy:
     description:
-      - The json dict policy to attach to queue
+      - The json dict policy to attach to queue.  For more information, see 'Overview of AWS IAM Policies' in the Amazon IAM User Guide.
     required: false
     default: null
   redrive_policy:
