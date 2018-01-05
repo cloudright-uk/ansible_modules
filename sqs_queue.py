@@ -157,6 +157,7 @@ from ansible.module_utils.aws.core import AnsibleAWSModule
 from ansible.module_utils.ec2 import get_aws_connection_info, ec2_argument_spec, boto3_conn, camel_dict_to_snake_dict
 from ansible.module_utils.ec2 import AnsibleAWSError, connect_to_aws, ec2_argument_spec, get_aws_connection_info
 
+import pdb
 
 def create_or_update_sqs_queue(connection, module):
     queue_name = module.params.get('name')
@@ -173,33 +174,44 @@ def create_or_update_sqs_queue(connection, module):
         redrive_policy=module.params.get('redrive_policy')
     )
 
+    # If FIFO queue, change name as it must end in .fifo
+    # Also add the ContentBasedDeduplication attributes to the queue_attributes dictionary
+    if queue_type == 'fifo':
+        queue_name = queue_name + '.fifo'
+        try:
+            queue_attributes.update({'fifo_content_based_deduplication':module.params.get('fifo_content_based_deduplication')})
+        except botocore.exceptions.ClientError:
+            result['msg'] = 'Failed to create/update sqs queue due to error: ' + traceback.format_exc()
+            module.fail_json(**result)
+
     result = dict(
         region=module.params.get('region'),
         name=queue_name,
     )
     result.update(queue_attributes)
 
-    # Add attributes for a FIFO queue type
-    # if queue_type == 'fifo':
-    #     queue_attributes.update(
-    #         FifoQueue=True
-    #         ContentBasedDeduplication=module.params.get('fifo_content_based_deduplication')
-    #     )
-
-
     try:
-        # import pdb
-        # pdb.set_trace()
         # Check to see if the queue already exists
         try:
             queue_url = connection.get_queue_url(QueueName=queue_name)['QueueUrl']
+            existing_queue = True
         except:
+            pass
+
+        if existing_queue:
+            result['changed'] = update_sqs_queue(connection, queue_url, check_mode=module.check_mode, **queue_attributes)
+        else:
             # Create new one if it doesn't exist and not in check mode
             if not module.check_mode:
-                queue_url = connection.create_queue(QueueName=queue_name)['QueueUrl']
-                result['changed'] = True
+                # Add attributes for a FIFO queue type
+                if queue_type == 'fifo':
+                    queue_url = connection.create_queue(QueueName=queue_name, Attributes={'FifoQueue':'True'})['QueueUrl']
+                    result['changed'] = True
+                else:
+                    queue_url = connection.create_queue(QueueName=queue_name)['QueueUrl']
+                    result['changed'] = True
 
-        result['changed'] = update_sqs_queue(connection, queue_url, check_mode=module.check_mode, **queue_attributes)
+                update_sqs_queue(connection, queue_url, check_mode=module.check_mode, **queue_attributes)
 
         if not module.check_mode:
             queue_attributes = connection.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['All'])
@@ -209,6 +221,8 @@ def create_or_update_sqs_queue(connection, module):
             result['maximum_message_size'] = queue_attributes['Attributes']['MaximumMessageSize']
             result['delivery_delay'] = queue_attributes['Attributes']['DelaySeconds']
             result['receive_message_wait_time'] = queue_attributes['Attributes']['ReceiveMessageWaitTimeSeconds']
+            if queue_type == 'fifo':
+                result['fifo_content_based_deduplication'] = queue_attributes['Attributes']['ContentBasedDeduplication']
 
     except botocore.exceptions.ClientError:
         result['msg'] = 'Failed to create/update sqs queue due to error: ' + traceback.format_exc()
@@ -226,7 +240,8 @@ def update_sqs_queue(connection,
                      delivery_delay=None,
                      receive_message_wait_time=None,
                      policy=None,
-                     redrive_policy=None):
+                     redrive_policy=None,
+                     fifo_content_based_deduplication=None):
     changed = False
 
     changed = set_queue_attribute(connection, queue_url, 'VisibilityTimeout', default_visibility_timeout,
@@ -243,6 +258,8 @@ def update_sqs_queue(connection,
                                   check_mode=check_mode) or changed
     changed = set_queue_attribute(connection, queue_url, 'RedrivePolicy', redrive_policy,
                                   check_mode=check_mode) or changed
+    changed = set_queue_attribute(connection, queue_url, 'ContentBasedDeduplication', fifo_content_based_deduplication,
+                                  check_mode=check_mode) or changed
     return changed
 
 
@@ -250,8 +267,9 @@ def set_queue_attribute(connection, queue_url, attribute, value, check_mode=Fals
     if not value and value != 0:
         return False
 
+    # Get the current value, or return an empty string.
     try:
-        existing_value = connection.get_queue_attributes(QueueUrl=queue_url, AttributeNames=attribute)[attribute]
+        existing_value = connection.get_queue_attributes(QueueUrl=queue_url, AttributeNames=[attribute])['Attributes'][attribute]
     except:
         existing_value = ''
 
@@ -261,7 +279,7 @@ def set_queue_attribute(connection, queue_url, attribute, value, check_mode=Fals
         if existing_value:
             existing_value = json.dumps(json.loads(existing_value), sort_keys=True)
 
-    if str(value) != existing_value:
+    if str(value).lower() != existing_value:
         if not check_mode:
             result = connection.set_queue_attributes(QueueUrl=queue_url, Attributes={attribute:str(value)})
         return True
@@ -269,29 +287,29 @@ def set_queue_attribute(connection, queue_url, attribute, value, check_mode=Fals
     return False
 
 
-# def delete_sqs_queue(connection, module):
-#     queue_name = module.params.get('name')
-#
-#     result = dict(
-#         region=module.params.get('region'),
-#         name=queue_name,
-#     )
-#
-#     try:
-#         queue = connection.get_queue(queue_name)
-#         if queue:
-#             if not module.check_mode:
-#                 connection.delete_queue(queue)
-#             result['changed'] = True
-#
-#         else:
-#             result['changed'] = False
-#
-#     except BotoServerError:
-#         result['msg'] = 'Failed to delete sqs queue due to error: ' + traceback.format_exc()
-#         module.fail_json(**result)
-#     else:
-#         module.exit_json(**result)
+def delete_sqs_queue(connection, module):
+    queue_name = module.params.get('name')
+
+    result = dict(
+        region=module.params.get('region'),
+        name=queue_name,
+    )
+
+    try:
+        queue_url = connection.get_queue_url(QueueName=queue_name)['QueueUrl']
+        if queue_url:
+            if not module.check_mode:
+                connection.delete_queue(QueueUrl=queue_url)
+            result['changed'] = True
+
+        else:
+            result['changed'] = False
+
+    except botocore.exceptions.ClientError:
+        result['msg'] = 'Failed to delete sqs queue due to error: ' + traceback.format_exc()
+        module.fail_json(**result)
+    else:
+        module.exit_json(**result)
 
 
 def main():
