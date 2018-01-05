@@ -3,4 +3,4 @@
 #### Ansible Modules that I've written
 
 #### Modules
-- sqs_queue: refactored to BOTO3, added FIFO support.
+- sqs_queue: refactored to BOTO3, added FIFO support, add Tags support.
