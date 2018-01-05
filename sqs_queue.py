@@ -147,19 +147,21 @@ import json
 import traceback
 
 try:
-    import boto.sqs
-    from boto.exception import BotoServerError, NoAuthHandlerFound
-    HAS_BOTO = True
-
+  import botocore
+  import boto3
+  HAS_BOTO3 = True
 except ImportError:
-    HAS_BOTO = False
+  HAS_BOTO3 = False
 
-from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.aws.core import AnsibleAWSModule
+from ansible.module_utils.ec2 import get_aws_connection_info, ec2_argument_spec, boto3_conn, camel_dict_to_snake_dict
 from ansible.module_utils.ec2 import AnsibleAWSError, connect_to_aws, ec2_argument_spec, get_aws_connection_info
 
 
 def create_or_update_sqs_queue(connection, module):
     queue_name = module.params.get('name')
+    queue_type = module.params.get('queue_type')
+    existing_queue = False
 
     queue_attributes = dict(
         default_visibility_timeout=module.params.get('default_visibility_timeout'),
@@ -177,34 +179,45 @@ def create_or_update_sqs_queue(connection, module):
     )
     result.update(queue_attributes)
 
+    # Add attributes for a FIFO queue type
+    # if queue_type == 'fifo':
+    #     queue_attributes.update(
+    #         FifoQueue=True
+    #         ContentBasedDeduplication=module.params.get('fifo_content_based_deduplication')
+    #     )
+
+
     try:
-        queue = connection.get_queue(queue_name)
-        if queue:
+        # import pdb
+        # pdb.set_trace()
+        queue_url = connection.get_queue_url(QueueName=queue_name)['QueueUrl']
+        if queue_url:
             # Update existing
-            result['changed'] = update_sqs_queue(queue, check_mode=module.check_mode, **queue_attributes)
-        else:
-            # Create new
-            if not module.check_mode:
-                queue = connection.create_queue(queue_name)
-                update_sqs_queue(queue, **queue_attributes)
-            result['changed'] = True
+            result['changed'] = update_sqs_queue(connection, queue_url, check_mode=module.check_mode, **queue_attributes)
+        # else:
+        #     # Create new
+        #     if not module.check_mode:
+        #         queue = connection.create_queue(queue_name)
+        #         update_sqs_queue(queue, **queue_attributes)
+        #     result['changed'] = True
+        #
+        # if not module.check_mode:
+        #     result['queue_arn'] = queue.get_attributes('QueueArn')['QueueArn']
+        #     result['default_visibility_timeout'] = queue.get_attributes('VisibilityTimeout')['VisibilityTimeout']
+        #     result['message_retention_period'] = queue.get_attributes('MessageRetentionPeriod')['MessageRetentionPeriod']
+        #     result['maximum_message_size'] = queue.get_attributes('MaximumMessageSize')['MaximumMessageSize']
+        #     result['delivery_delay'] = queue.get_attributes('DelaySeconds')['DelaySeconds']
+        #     result['receive_message_wait_time'] = queue.get_attributes('ReceiveMessageWaitTimeSeconds')['ReceiveMessageWaitTimeSeconds']
 
-        if not module.check_mode:
-            result['queue_arn'] = queue.get_attributes('QueueArn')['QueueArn']
-            result['default_visibility_timeout'] = queue.get_attributes('VisibilityTimeout')['VisibilityTimeout']
-            result['message_retention_period'] = queue.get_attributes('MessageRetentionPeriod')['MessageRetentionPeriod']
-            result['maximum_message_size'] = queue.get_attributes('MaximumMessageSize')['MaximumMessageSize']
-            result['delivery_delay'] = queue.get_attributes('DelaySeconds')['DelaySeconds']
-            result['receive_message_wait_time'] = queue.get_attributes('ReceiveMessageWaitTimeSeconds')['ReceiveMessageWaitTimeSeconds']
-
-    except BotoServerError:
+    except botocore.exceptions.ClientError:
         result['msg'] = 'Failed to create/update sqs queue due to error: ' + traceback.format_exc()
         module.fail_json(**result)
     else:
         module.exit_json(**result)
 
 
-def update_sqs_queue(queue,
+def update_sqs_queue(connection,
+                     queue_url,
                      check_mode=False,
                      default_visibility_timeout=None,
                      message_retention_period=None,
@@ -215,29 +228,29 @@ def update_sqs_queue(queue,
                      redrive_policy=None):
     changed = False
 
-    changed = set_queue_attribute(queue, 'VisibilityTimeout', default_visibility_timeout,
+    changed = set_queue_attribute(connection, queue_url, 'VisibilityTimeout', default_visibility_timeout,
                                   check_mode=check_mode) or changed
-    changed = set_queue_attribute(queue, 'MessageRetentionPeriod', message_retention_period,
+    changed = set_queue_attribute(connection, queue_url, 'MessageRetentionPeriod', message_retention_period,
                                   check_mode=check_mode) or changed
-    changed = set_queue_attribute(queue, 'MaximumMessageSize', maximum_message_size,
+    changed = set_queue_attribute(connection, queue_url, 'MaximumMessageSize', maximum_message_size,
                                   check_mode=check_mode) or changed
-    changed = set_queue_attribute(queue, 'DelaySeconds', delivery_delay,
+    changed = set_queue_attribute(connection, queue_url, 'DelaySeconds', delivery_delay,
                                   check_mode=check_mode) or changed
-    changed = set_queue_attribute(queue, 'ReceiveMessageWaitTimeSeconds', receive_message_wait_time,
+    changed = set_queue_attribute(connection, queue_url, 'ReceiveMessageWaitTimeSeconds', receive_message_wait_time,
                                   check_mode=check_mode) or changed
-    changed = set_queue_attribute(queue, 'Policy', policy,
+    changed = set_queue_attribute(connection, queue_url, 'Policy', policy,
                                   check_mode=check_mode) or changed
-    changed = set_queue_attribute(queue, 'RedrivePolicy', redrive_policy,
+    changed = set_queue_attribute(connection, queue_url, 'RedrivePolicy', redrive_policy,
                                   check_mode=check_mode) or changed
     return changed
 
 
-def set_queue_attribute(queue, attribute, value, check_mode=False):
+def set_queue_attribute(connection, queue_url, attribute, value, check_mode=False):
     if not value and value != 0:
         return False
 
     try:
-        existing_value = queue.get_attributes(attributes=attribute)[attribute]
+        existing_value = connection.get_queue_attributes(QueueUrl=queue_url, AttributeNames=attribute)[attribute]
     except:
         existing_value = ''
 
@@ -249,35 +262,35 @@ def set_queue_attribute(queue, attribute, value, check_mode=False):
 
     if str(value) != existing_value:
         if not check_mode:
-            queue.set_attribute(attribute, value)
+            result = connection.set_queue_attributes(QueueUrl=queue_url, Attributes={attribute:str(value)})
         return True
 
     return False
 
 
-def delete_sqs_queue(connection, module):
-    queue_name = module.params.get('name')
-
-    result = dict(
-        region=module.params.get('region'),
-        name=queue_name,
-    )
-
-    try:
-        queue = connection.get_queue(queue_name)
-        if queue:
-            if not module.check_mode:
-                connection.delete_queue(queue)
-            result['changed'] = True
-
-        else:
-            result['changed'] = False
-
-    except BotoServerError:
-        result['msg'] = 'Failed to delete sqs queue due to error: ' + traceback.format_exc()
-        module.fail_json(**result)
-    else:
-        module.exit_json(**result)
+# def delete_sqs_queue(connection, module):
+#     queue_name = module.params.get('name')
+#
+#     result = dict(
+#         region=module.params.get('region'),
+#         name=queue_name,
+#     )
+#
+#     try:
+#         queue = connection.get_queue(queue_name)
+#         if queue:
+#             if not module.check_mode:
+#                 connection.delete_queue(queue)
+#             result['changed'] = True
+#
+#         else:
+#             result['changed'] = False
+#
+#     except BotoServerError:
+#         result['msg'] = 'Failed to delete sqs queue due to error: ' + traceback.format_exc()
+#         module.fail_json(**result)
+#     else:
+#         module.exit_json(**result)
 
 
 def main():
@@ -285,6 +298,8 @@ def main():
     argument_spec.update(dict(
         state=dict(default='present', choices=['present', 'absent']),
         name=dict(required=True, type='str'),
+        queue_type=dict(default='standard', choices=['standard', 'fifo']),
+        fifo_content_based_deduplication=dict(default=False, type='bool'),
         default_visibility_timeout=dict(type='int'),
         message_retention_period=dict(type='int'),
         maximum_message_size=dict(type='int'),
@@ -294,7 +309,7 @@ def main():
         redrive_policy=dict(type='dict', required=False),
     ))
 
-    module = AnsibleModule(
+    module = AnsibleAWSModule(
         argument_spec=argument_spec,
         supports_check_mode=True)
 
