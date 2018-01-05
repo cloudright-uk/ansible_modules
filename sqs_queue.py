@@ -190,24 +190,25 @@ def create_or_update_sqs_queue(connection, module):
     try:
         # import pdb
         # pdb.set_trace()
-        queue_url = connection.get_queue_url(QueueName=queue_name)['QueueUrl']
-        if queue_url:
-            # Update existing
-            result['changed'] = update_sqs_queue(connection, queue_url, check_mode=module.check_mode, **queue_attributes)
-        # else:
-        #     # Create new
-        #     if not module.check_mode:
-        #         queue = connection.create_queue(queue_name)
-        #         update_sqs_queue(queue, **queue_attributes)
-        #     result['changed'] = True
-        #
-        # if not module.check_mode:
-        #     result['queue_arn'] = queue.get_attributes('QueueArn')['QueueArn']
-        #     result['default_visibility_timeout'] = queue.get_attributes('VisibilityTimeout')['VisibilityTimeout']
-        #     result['message_retention_period'] = queue.get_attributes('MessageRetentionPeriod')['MessageRetentionPeriod']
-        #     result['maximum_message_size'] = queue.get_attributes('MaximumMessageSize')['MaximumMessageSize']
-        #     result['delivery_delay'] = queue.get_attributes('DelaySeconds')['DelaySeconds']
-        #     result['receive_message_wait_time'] = queue.get_attributes('ReceiveMessageWaitTimeSeconds')['ReceiveMessageWaitTimeSeconds']
+        # Check to see if the queue already exists
+        try:
+            queue_url = connection.get_queue_url(QueueName=queue_name)['QueueUrl']
+        except:
+            # Create new one if it doesn't exist and not in check mode
+            if not module.check_mode:
+                queue_url = connection.create_queue(QueueName=queue_name)['QueueUrl']
+                result['changed'] = True
+
+        result['changed'] = update_sqs_queue(connection, queue_url, check_mode=module.check_mode, **queue_attributes)
+
+        if not module.check_mode:
+            queue_attributes = connection.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['All'])
+            result['queue_arn'] = queue_attributes['Attributes']['QueueArn']
+            result['default_visibility_timeout'] = queue_attributes['Attributes']['VisibilityTimeout']
+            result['message_retention_period'] = queue_attributes['Attributes']['MessageRetentionPeriod']
+            result['maximum_message_size'] = queue_attributes['Attributes']['MaximumMessageSize']
+            result['delivery_delay'] = queue_attributes['Attributes']['DelaySeconds']
+            result['receive_message_wait_time'] = queue_attributes['Attributes']['ReceiveMessageWaitTimeSeconds']
 
     except botocore.exceptions.ClientError:
         result['msg'] = 'Failed to create/update sqs queue due to error: ' + traceback.format_exc()
