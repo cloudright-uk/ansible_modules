@@ -83,6 +83,17 @@ options:
     required: False
     choices: ['true', 'false']
     default: false
+  tags:
+    description:
+      - Cost allocation tags for the queue.
+    required: False
+    default: None
+  purge_tags:
+    description:
+      - Should existing tags be purged if not listed in "tags"
+    required: False
+    choices: ['true', 'false']
+    default: true
 
 extends_documentation_fragment:
     - aws
@@ -138,7 +149,7 @@ fifo_content_based_deduplication:
 '''
 
 EXAMPLES = '''
-# Create SQS queue with redrive policy
+# Create SQS queue with redrive policy and tags
 - sqs_queue:
     name: my-queue
     region: ap-southeast-2
@@ -147,6 +158,8 @@ EXAMPLES = '''
     maximum_message_size: 1024
     delivery_delay: 30
     receive_message_wait_time: 20
+    tags:
+      Owner: "me"
     policy: "{{ json_dict }}"
     redrive_policy:
       maxReceiveCount: 5
@@ -163,6 +176,8 @@ EXAMPLES = '''
     maximum_message_size: 1024
     delivery_delay: 30
     receive_message_wait_time: 20
+    tags:
+      Owner: "me"
     policy: "{{ json_dict }}"
     redrive_policy:
       maxReceiveCount: 5
@@ -187,9 +202,9 @@ except ImportError:
 
 from ansible.module_utils.aws.core import AnsibleAWSModule
 from ansible.module_utils.ec2 import get_aws_connection_info, ec2_argument_spec, boto3_conn, camel_dict_to_snake_dict
-from ansible.module_utils.ec2 import AnsibleAWSError, connect_to_aws, ec2_argument_spec, get_aws_connection_info
+from ansible.module_utils.ec2 import boto3_tag_list_to_ansible_dict, ansible_dict_to_boto3_tag_list, compare_aws_tags
 
-import pdb
+from ansible.module_utils.ec2 import AnsibleAWSError, connect_to_aws, ec2_argument_spec, get_aws_connection_info
 
 def create_or_update_sqs_queue(connection, module):
     queue_name = module.params.get('name')
@@ -231,7 +246,7 @@ def create_or_update_sqs_queue(connection, module):
             pass
 
         if existing_queue:
-            result['changed'] = update_sqs_queue(connection, queue_url, check_mode=module.check_mode, **queue_attributes)
+            result['changed'] = update_sqs_queue(connection, queue_url, module.params.get('tags'), module.params.get('purge_tags'), check_mode=module.check_mode, **queue_attributes)
         else:
             # Create new one if it doesn't exist and not in check mode
             if not module.check_mode:
@@ -243,7 +258,7 @@ def create_or_update_sqs_queue(connection, module):
                     queue_url = connection.create_queue(QueueName=queue_name)['QueueUrl']
                     result['changed'] = True
 
-                update_sqs_queue(connection, queue_url, check_mode=module.check_mode, **queue_attributes)
+                update_sqs_queue(connection, queue_url, module.params.get('tags'), module.params.get('purge_tags'), check_mode=module.check_mode, **queue_attributes)
 
         if not module.check_mode:
             queue_attributes = connection.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['All'])
@@ -265,6 +280,8 @@ def create_or_update_sqs_queue(connection, module):
 
 def update_sqs_queue(connection,
                      queue_url,
+                     tags,
+                     purge_tags,
                      check_mode=False,
                      default_visibility_timeout=None,
                      message_retention_period=None,
@@ -292,6 +309,9 @@ def update_sqs_queue(connection,
                                   check_mode=check_mode) or changed
     changed = set_queue_attribute(connection, queue_url, 'ContentBasedDeduplication', fifo_content_based_deduplication,
                                   check_mode=check_mode) or changed
+
+    changed = modify_tags (queue_url, connection, tags, purge_tags)
+
     return changed
 
 
@@ -322,6 +342,9 @@ def set_queue_attribute(connection, queue_url, attribute, value, check_mode=Fals
 def delete_sqs_queue(connection, module):
     queue_name = module.params.get('name')
 
+    if module.params.get('queue_type') == 'fifo':
+        queue_name = queue_name + '.fifo'
+
     result = dict(
         region=module.params.get('region'),
         name=queue_name,
@@ -344,13 +367,48 @@ def delete_sqs_queue(connection, module):
         module.exit_json(**camel_dict_to_snake_dict(result))
 
 
+def modify_tags(queue_url, connection, tags, purge_tags):
+    current_tags = None
+    changed = False
+
+    # Get current tags if they exist
+    try:
+        current_tags = connection.list_queue_tags(QueueUrl=queue_url)['Tags']
+    except:
+        tags_need_modify = tags
+
+    # Modify current tags
+    if current_tags:
+        tags_need_modify, tags_to_delete = compare_aws_tags(current_tags, tags, purge_tags)
+
+        if tags_to_delete:
+            try:
+                connection.untag_queue(QueueUrl=queue_url, TagKeys=tags_to_delete)
+                changed = True
+            except botocore.exceptions.ClientError as e:
+                result['msg'] = 'Failed to remove tags: ' + traceback.format_exc()
+                module.fail_json(**result)
+
+    # Add/update tags
+    if tags_need_modify:
+        try:
+            connection.tag_queue(QueueUrl=queue_url, Tags=tags_need_modify)
+            changed = True
+        except botocore.exceptions.ClientError as e:
+            result['msg'] = 'Failed to add tags: ' + traceback.format_exc()
+            module.fail_json(**result)
+
+    return changed
+
+
+
 def main():
     argument_spec = ec2_argument_spec()
     argument_spec.update(dict(
         state=dict(default='present', choices=['present', 'absent']),
         name=dict(required=True, type='str'),
-        queue_type=dict(default='standard', choices=['standard', 'fifo']),
-        fifo_content_based_deduplication=dict(default=False, type='bool'),
+        queue_type=dict(default='standard', choices=['standard', 'fifo'], required=False),
+        fifo_content_based_deduplication=dict(default=False, type='bool', required=False),
         default_visibility_timeout=dict(type='int'),
         message_retention_period=dict(type='int'),
         maximum_message_size=dict(type='int'),
@@ -358,6 +416,8 @@ def main():
         receive_message_wait_time=dict(type='int'),
         policy=dict(type='dict', required=False),
         redrive_policy=dict(type='dict', required=False),
+        tags=dict(default={}, type='dict', required=False),
+        purge_tags=dict(default=True, type='bool', required=False)
     ))
 
     module = AnsibleAWSModule(
